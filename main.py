@@ -66,23 +66,39 @@ def detect_type(symbol):
 def fetch_market_data(symbol):
     asset_type, key = detect_type(symbol)
 
+    # REAL FYERS DATA
     if FYERS_QUOTE_URL and FYERS_ACCESS_TOKEN:
         try:
-            headers = {"Authorization": f"Bearer {FYERS_ACCESS_TOKEN}"}
-            params = {"symbol": key, "type": asset_type}
-            res = requests.get(FYERS_QUOTE_URL, params=params, headers=headers, timeout=10)
-            res.raise_for_status()
-            data = res.json()
+            headers = {
+                "Authorization": f"Bearer {FYERS_ACCESS_TOKEN}",
+                "Content-Type": "application/json"
+            }
+
+            # FYERS expects list of symbols
+            payload = {"symbols": [key]}
+
+            r = requests.post(FYERS_QUOTE_URL, json=payload, headers=headers, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+
+            # Extract price
+            if "d" in data and len(data["d"]) > 0:
+                item = data["d"][0]
+                last_price = item.get("v", {}).get("lp")  # v.lp = last price
+            else:
+                last_price = None
+
             return {
                 "symbol": symbol,
                 "type": asset_type,
-                "last_price": data.get("last_price", data.get("lp")),
+                "last_price": last_price,
                 "raw": data
             }
+
         except Exception as e:
             return {"symbol": symbol, "type": asset_type, "error": str(e)}
 
-    # fallback mocked values:
+    # fallback (no real URL)
     return {
         "symbol": symbol,
         "type": asset_type,
@@ -143,22 +159,12 @@ def parse_signal(text):
 # ORDER (OPTIONAL)
 # -----------------------------
 def fyers_order(payload):
-    if DRY_RUN:
-        return {"status": "dry_run", "detail": "Order skipped", "payload": payload}
-
-    if not (FYERS_ACCESS_TOKEN and FYERS_ORDER_URL):
-        return {"status": "error", "detail": "Missing order URL or token"}
-
-    try:
-        headers = {
-            "Authorization": f"Bearer {FYERS_ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        resp = requests.post(FYERS_ORDER_URL, json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
+    # SAFE MODE: No orders are ever placed.
+    return {
+        "status": "dry_run",
+        "detail": "Order execution is disabled",
+        "payload": payload
+    }
 
 
 # -----------------------------
