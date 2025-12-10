@@ -1,34 +1,35 @@
 # main.py
-# Advanced hourly bot: FYERS → OpenAI → Signal → (Optional) Place order → Log
-# Works for Index, Stocks, Options, ETFs, Mutual Funds
+# Advanced hourly bot using NEW OpenAI Python API (Responses API)
+# Supports Index, Stocks, Options, ETFs, Mutual Funds
 
 import os
 import time
 import json
 from datetime import datetime
 import requests
-import openai
+from openai import OpenAI  # NEW API
 
-# -----------------------------------------
-# CONFIGURATION
-# -----------------------------------------
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.1")
+# -----------------------------
+# CONFIG
+# -----------------------------
+OPENAI_MODEL = "gpt-5.1"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "600"))
 SYMBOLS = os.getenv("SYMBOLS", "NIFTY50").split(",")
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes")
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 LOG_FILE = os.getenv("LOG_FILE", "signals.log")
 
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-FYERS_QUOTE_URL = os.getenv("FYERS_QUOTE_URL", "")     # if you have a custom endpoint
-FYERS_ORDER_URL = os.getenv("FYERS_ORDER_URL", "")     # optional
+FYERS_QUOTE_URL = os.getenv("FYERS_QUOTE_URL", "")
+FYERS_ORDER_URL = os.getenv("FYERS_ORDER_URL", "")
+
 OMEGA_PROMPT_PATH = os.getenv("OMEGA_PROMPT_PATH", "prompts/omega-fi-prompt.txt")
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-# -----------------------------------------
-# LOAD SYSTEM PROMPT
-# -----------------------------------------
+# -----------------------------
+# LOAD PROMPT
+# -----------------------------
 def load_system_prompt():
     try:
         with open(OMEGA_PROMPT_PATH, "r", encoding="utf-8") as f:
@@ -36,14 +37,13 @@ def load_system_prompt():
     except:
         return (
             "You are an expert Indian financial market analyst. "
-            "Analyze Index, Stocks, Options, ETFs, Mutual Funds. "
-            "Provide BUY/SELL/HOLD signals with reasons."
+            "Analyze Index, Stocks, Options, ETFs, Mutual Funds and provide BUY/SELL/HOLD."
         )
 
 
-# -----------------------------------------
-# IDENTIFY SYMBOL TYPE
-# -----------------------------------------
+# -----------------------------
+# DETECT SYMBOL TYPE
+# -----------------------------
 def detect_type(symbol):
     s = symbol.upper()
     if s.startswith("OPTION:"):
@@ -57,73 +57,74 @@ def detect_type(symbol):
     return "INDEX", symbol
 
 
-# -----------------------------------------
-# FETCH MARKET DATA
-# -----------------------------------------
+# -----------------------------
+# FETCH DATA
+# -----------------------------
 def fetch_market_data(symbol):
     asset_type, key = detect_type(symbol)
 
-    # Use FYERS API if URL + token provided
     if FYERS_QUOTE_URL and FYERS_ACCESS_TOKEN:
         try:
             headers = {"Authorization": f"Bearer {FYERS_ACCESS_TOKEN}"}
             params = {"symbol": key, "type": asset_type}
-            r = requests.get(FYERS_QUOTE_URL, params=params, headers=headers, timeout=10)
-            r.raise_for_status()
-            data = r.json()
+            res = requests.get(FYERS_QUOTE_URL, params=params, headers=headers, timeout=10)
+            res.raise_for_status()
+            data = res.json()
             return {
                 "symbol": symbol,
                 "type": asset_type,
-                "last_price": data.get("last_price", data.get("lp", None)),
+                "last_price": data.get("last_price", data.get("lp")),
                 "raw": data
             }
         except Exception as e:
             return {"symbol": symbol, "type": asset_type, "error": str(e)}
 
-    # Fallback mocked prices (so bot still runs)
-    mock_price = round(1000 + (hash(symbol) % 600), 2)
-    return {"symbol": symbol, "type": asset_type, "last_price": mock_price}
+    # fallback mocked values:
+    return {
+        "symbol": symbol,
+        "type": asset_type,
+        "last_price": round(1000 + (hash(symbol) % 500), 2)
+    }
 
 
-# -----------------------------------------
-# BUILD SNAPSHOT FOR GPT
-# -----------------------------------------
-def build_market_snapshot(symbol_data):
+# -----------------------------
+# SNAPSHOT
+# -----------------------------
+def build_snapshot(symbol_data):
     lines = []
-    for s in symbol_data:
-        if "error" in s:
-            lines.append(f"{s['symbol']} ({s['type']}): ERROR → {s['error']}")
+    for item in symbol_data:
+        if "error" in item:
+            lines.append(f"{item['symbol']} ({item['type']}): ERROR → {item['error']}")
         else:
-            lines.append(f"{s['symbol']} ({s['type']}): price={s.get('last_price')}")
+            lines.append(f"{item['symbol']} ({item['type']}): price={item['last_price']}")
     return (
         "Market Snapshot:\n" +
         "\n".join(lines) +
-        "\n\nProvide a single-line BUY/SELL/HOLD signal **for each symbol** with a short reason."
+        "\n\nProvide a BUY/SELL/HOLD for **each** symbol with a short reason."
     )
 
 
-# -----------------------------------------
-# OPENAI CALL
-# -----------------------------------------
-def ask_gpt(system_prompt, market_snapshot):
+# -----------------------------
+# OPENAI (NEW API)
+# -----------------------------
+def ask_gpt(system_prompt, snapshot):
     try:
-        response = openai.ChatCompletion.create(
+        response = client.responses.create(
             model=OPENAI_MODEL,
-            messages=[
+            input=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": market_snapshot}
+                {"role": "user", "content": snapshot}
             ],
-            max_tokens=MAX_TOKENS,
-            temperature=0.25
+            max_output_tokens=MAX_TOKENS,
         )
-        return response["choices"][0]["message"]["content"].strip()
+        return response.output_text
     except Exception as e:
         return f"ERROR contacting OpenAI: {e}"
 
 
-# -----------------------------------------
+# -----------------------------
 # PARSE SIGNAL
-# -----------------------------------------
+# -----------------------------
 def parse_signal(text):
     t = text.upper()
     if "BUY" in t:
@@ -135,89 +136,88 @@ def parse_signal(text):
     return "UNKNOWN"
 
 
-# -----------------------------------------
-# SEND ORDER (OPTIONAL)
-# -----------------------------------------
+# -----------------------------
+# ORDER (OPTIONAL)
+# -----------------------------
 def fyers_order(payload):
     if DRY_RUN:
-        return {"status": "dry_run", "detail": "Order not executed", "payload": payload}
+        return {"status": "dry_run", "detail": "Order skipped", "payload": payload}
 
-    if not (FYERS_ORDER_URL and FYERS_ACCESS_TOKEN):
-        return {"status": "error", "detail": "Order URL or token missing"}
+    if not (FYERS_ACCESS_TOKEN and FYERS_ORDER_URL):
+        return {"status": "error", "detail": "Missing order URL or token"}
 
     try:
         headers = {
             "Authorization": f"Bearer {FYERS_ACCESS_TOKEN}",
             "Content-Type": "application/json"
         }
-        r = requests.post(FYERS_ORDER_URL, json=payload, headers=headers, timeout=10)
-        r.raise_for_status()
-        return r.json()
+        resp = requests.post(FYERS_ORDER_URL, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
 
-# -----------------------------------------
+# -----------------------------
 # LOGGING
-# -----------------------------------------
-def write_log(entry):
+# -----------------------------
+def write_log(content):
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(entry + "\n")
+            f.write(content + "\n")
     except:
         pass
 
 
-# -----------------------------------------
-# MAIN
-# -----------------------------------------
+# -----------------------------
+# MAIN BOT LOGIC
+# -----------------------------
 def main():
     timestamp = datetime.utcnow().isoformat()
 
     system_prompt = load_system_prompt()
 
-    # ---- Fetch all symbols ----
+    # fetch symbols
     data_list = []
-    for sym in SYMBOLS:
-        sym = sym.strip()
-        if sym:
-            data_list.append(fetch_market_data(sym))
+    for s in SYMBOLS:
+        if s.strip():
+            data_list.append(fetch_market_data(s.strip()))
 
-    # ---- Build snapshot ----
-    snapshot = build_market_snapshot(data_list)
+    # build snapshot
+    snapshot = build_snapshot(data_list)
 
-    # ---- Ask GPT ----
+    # call GPT
     gpt_result = ask_gpt(system_prompt, snapshot)
     signal = parse_signal(gpt_result)
 
-    # ---- Prepare order ----
+    # prepare order
     order_payload = {
-        "timestamp": int(time.time()),
+        "symbol": SYMBOLS[0].strip(),
         "signal": signal,
         "reason": gpt_result,
-        "primary_symbol": SYMBOLS[0].strip() if SYMBOLS else "N/A"
+        "ts": int(time.time())
     }
 
-    # ---- Execute order ----
+    # send
     order_response = fyers_order(order_payload)
 
-    # ---- Log everything ----
-    log_entry = json.dumps({
-        "time": timestamp,
+    # log
+    log_line = json.dumps({
+        "timestamp": timestamp,
         "symbols": SYMBOLS,
         "snapshot": snapshot,
-        "signal_text": gpt_result,
-        "parsed_signal": signal,
+        "gpt_output": gpt_result,
+        "signal": signal,
         "order_response": order_response
     }, ensure_ascii=False)
 
-    write_log(log_entry)
+    write_log(log_line)
 
-    # Console for GitHub Action log
-    print("✔ Bot run complete")
-    print("Signal:", signal)
-    print("Reason:", gpt_result[:200], "...")
-    print("Order Result:", order_response)
+    # console output for Actions
+    print("✔ Bot run completed")
+    print("Signal =", signal)
+    print("GPT Output =", gpt_result[:250], "...")
+    print("Order Response:", order_response)
 
 
 if __name__ == "__main__":
