@@ -26,6 +26,9 @@ OMEGA_PROMPT_PATH = os.getenv("OMEGA_PROMPT_PATH", "prompts/omega-fi-prompt.txt"
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# FORCE no-live-orders — safety override
+DRY_RUN = True
+
 
 # -----------------------------
 # LOAD PROMPT
